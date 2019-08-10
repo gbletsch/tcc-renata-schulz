@@ -2,15 +2,119 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/schema"
+	_ "github.com/lib/pq" // postgres
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func ConnectDB(dbName string) *sql.DB {
+const APIPort = ":8080"
+const SqliteDBName = "./hemato.db" // sqlite
+const DRIVER_NAME = "postgres"
+const DB_USER = "postgres"
+const DB_PASSWORD = "12345"
+const POSTGRES_DB_NAME = "hemato" // postgres
+const SSLMODE = "disable"
+const HOST = "172.17.0.2"
+const PORT = "5432"
+
+func main() {
+
+	a := App{}
+	a.Initialize(POSTGRES_DB_NAME)
+	a.Run(APIPort)
+
+}
+
+type App struct {
+	Router *mux.Router
+	DB     *sql.DB
+}
+
+func (a *App) Initialize(dbName string) {
+	// a.DB = ConnectSqliteDB(dbName)
+	a.DB = ConnectPostgresDB(dbName)
+	a.Router = mux.NewRouter().StrictSlash(true)
+	a.InitializeRoutes()
+}
+
+func (a *App) Run(addr string) {
+	fmt.Println("API running on port", addr)
+	log.Fatal(http.ListenAndServe(addr, a.Router))
+}
+
+func (a *App) InitializeRoutes() {
+	a.Router.Handle("/", a.getRoot()).Methods(http.MethodGet, http.MethodOptions)
+	a.Router.Handle("/index", a.getIndex()).Methods(http.MethodGet, http.MethodOptions)
+}
+
+func (a *App) getRoot() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		http.Redirect(w, r, "/index", http.StatusPermanentRedirect)
+	}
+}
+
+func (a *App) getIndex() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		err := r.ParseForm()
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, err)
+			return
+		}
+		resp, err := GetResponse(a.DB, r.Form)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		respondWithJSON(w, http.StatusOK, resp)
+	}
+}
+
+func respondWithError(w http.ResponseWriter, status int, payload interface{}) {
+	response, _ := json.Marshal(payload)
+
+	w.WriteHeader(status)
+	w.Write(response)
+}
+
+func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
+	response, _ := json.Marshal(payload)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	w.Write(response)
+}
+
+func ConnectSqliteDB(dbName string) *sql.DB {
 	db, err := sql.Open("sqlite3", dbName)
+	if err != nil {
+		panic(err)
+	}
+	err = db.Ping()
+	if err != nil {
+		log.Fatal("não pingou")
+	} else {
+		log.Println("pingou")
+	}
+	return db
+}
+
+func ConnectPostgresDB(dbName string) *sql.DB {
+	// var err error
+	connString := fmt.Sprintf(fmt.Sprintf(
+		"user=%s password=%s host=%s port=%s dbname=%s sslmode=%s",
+		DB_USER, DB_PASSWORD, HOST, PORT, dbName, SSLMODE,
+	))
+
+	db, err := sql.Open("postgres", connString)
 	if err != nil {
 		panic(err)
 	}
@@ -44,21 +148,21 @@ func validateFilter(params map[string][]string) (string, error) {
 		filter.Uf = ""
 	}
 	if filter.Uf != "" {
-		filterString += fmt.Sprintf(` AND UF_ZI = '%s'`, filter.Uf)
+		filterString += fmt.Sprintf(` AND "UF_ZI" = '%s'`, filter.Uf)
 	}
 
 	if filter.CID == "Todos" {
 		filter.CID = ""
 	}
 	if filter.CID != "" {
-		filterString += fmt.Sprintf(` AND DESCR_CID = '%s'`, filter.CID)
+		filterString += fmt.Sprintf(` AND "DESCR_CID" = '%s'`, filter.CID)
 	}
 
 	if filter.Ano == "Todos" {
 		filter.Ano = ""
 	}
 	if filter.Ano != "" {
-		filterString += fmt.Sprintf(` AND ANO_CMPT = '%s'`, filter.Ano)
+		filterString += fmt.Sprintf(` AND "ANO_CMPT" = '%s'`, filter.Ano)
 	}
 
 	filterString += ` GROUP BY 1 ORDER by 1`
@@ -96,7 +200,7 @@ func GetResponse(db *sql.DB, params map[string][]string) (interface{}, error) {
 			"lineplots": linePlots,
 			"age_hist":  ageHistData,
 			"USS_hist":  USSHistData,
-			"options": options,
+			"options":   options,
 		},
 	}, nil
 }
@@ -109,7 +213,7 @@ type ResponseRow struct {
 
 func GetData(db *sql.DB, filter string) (interface{}, error) {
 
-	query := `SELECT ano_cmpt as Ano, COUNT (n_aih) as Internações, round (AVG (morte), 2) as Mortalidade
+	query := `SELECT "ANO_CMPT" as Ano, COUNT ("N_AIH") as Internações, round (AVG ("MORTE"), 2) as Mortalidade
 				FROM admissions
 				WHERE 1=1`
 	query += filter
@@ -134,7 +238,7 @@ type HistData struct {
 }
 
 func GetAgeHistogram(db *sql.DB, filter string) (interface{}, error) {
-	query := `SELECT cast(idade/10 AS INT) * 10 as Idades, count(*) as Internações
+	query := `SELECT cast("IDADE"/10 AS INT) * 10 as Idades, count(*) as Internações
 				FROM admissions
 				WHERE 1=1`
 	query += filter
@@ -143,7 +247,7 @@ func GetAgeHistogram(db *sql.DB, filter string) (interface{}, error) {
 }
 
 func GetAIHHistogram(db *sql.DB, filter string) (interface{}, error) {
-	query := `SELECT cast(us_tot/500 AS INT) * 500 as US$, count(us_tot) as Internações
+	query := `SELECT cast("US_TOT"/500 AS INT) * 500 as US$, count("US_TOT") as Internações
 				FROM admissions
 				WHERE 1=1`
 	query += filter
@@ -168,9 +272,9 @@ func GetHistogram(db *sql.DB, query string) (interface{}, error) {
 
 func GetOptions(db *sql.DB, filter string) (interface{}, error) {
 	queries := [][]string{
-		{"ufs", `SELECT DISTINCT uf_zi as ufs FROM 'admissions' WHERE 1=1`},
-		{"years", `SELECT DISTINCT ano_cmpt as anos FROM 'admissions' WHERE 1=1`},
-		{"cids", `SELECT DISTINCT descr_cid as cids FROM 'admissions' WHERE 1=1`},
+		{"ufs", `SELECT DISTINCT "UF_ZI" as ufs FROM admissions WHERE 1=1`},
+		{"years", `SELECT DISTINCT "ANO_CMPT" as anos FROM admissions WHERE 1=1`},
+		{"cids", `SELECT DISTINCT "DESCR_CID" as cids FROM admissions WHERE 1=1`},
 	}
 
 	options := make(map[string][]string)
